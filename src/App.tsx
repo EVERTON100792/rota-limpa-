@@ -188,18 +188,11 @@ export default function App() {
     const success = await handleOptimize();
 
     if (success) {
-      // Show success state briefly
-      setIsOptimizingSuccess(true);
-
+      setActiveTab('map');
+      // Force a small resize event to ensure Leaflet map renders correctly after tab switch
       setTimeout(() => {
-        setIsOptimizingSuccess(false);
-        setActiveTab('map');
-
-        // Force a small resize event to ensure Leaflet map renders correctly after tab switch
-        setTimeout(() => {
-          window.dispatchEvent(new Event('resize'));
-        }, 300);
-      }, 1500); // Wait 1.5s to show the success animation
+        window.dispatchEvent(new Event('resize'));
+      }, 300);
     }
   };
 
@@ -222,170 +215,7 @@ export default function App() {
             progress={progress.total > 0 ? progress : undefined}
           />
         )}
-        {isOptimizingSuccess && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[9999] bg-black flex flex-col items-center justify-center p-6 text-center overflow-hidden"
-          >
-            {/* Background cinematic effect - Deep space feel */}
-            <div className="absolute inset-0 overflow-hidden">
-              <motion.div
-                animate={{
-                  scale: [1, 1.15, 1],
-                  opacity: [0.15, 0.3, 0.15]
-                }}
-                transition={{ duration: 20, repeat: Infinity, ease: "easeInOut" }}
-                className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,_#0f172a_0%,_#000_100%)]"
-              />
-              <motion.div
-                animate={{
-                  x: [-100, 100],
-                  y: [-50, 50],
-                  opacity: [0, 0.2, 0]
-                }}
-                transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
-                className="absolute inset-0 bg-[radial-gradient(circle_at_30%_40%,_#10b981_0%,_transparent_40%)] blur-[100px]"
-              />
-              <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] opacity-10" />
-            </div>
 
-            <div className="relative z-10">
-              <motion.div
-                initial={{ scale: 0.7, opacity: 0, rotateY: -110 }}
-                animate={{ scale: 1, opacity: 1, rotateY: 0 }}
-                transition={{ type: "spring", damping: 15, stiffness: 80, duration: 1.2 }}
-                className="w-56 h-56 bg-gradient-to-br from-brand-emerald/10 to-blue-600/5 rounded-[40px] border border-white/10 flex items-center justify-center mb-14 relative backdrop-blur-md shadow-2xl"
-              >
-                <motion.div
-                  animate={{
-                    boxShadow: [
-                      "0 0 30px rgba(16,185,129,0.1)",
-                      "0 0 80px rgba(16,185,129,0.4)",
-                      "0 0 30px rgba(16,185,129,0.1)"
-                    ],
-                    borderColor: [
-                      "rgba(255,255,255,0.1)",
-                      "rgba(16,185,129,0.4)",
-                      "rgba(255,255,255,0.1)"
-                    ]
-                  }}
-                  transition={{ duration: 3, repeat: Infinity }}
-                  className="absolute inset-0 rounded-[40px] border"
-                />
-
-                <motion.div
-                  initial={{ scale: 0, rotate: -45 }}
-                  animate={{ scale: 1, rotate: 0 }}
-                  transition={{ delay: 0.6, type: "spring", bounce: 0.7, duration: 0.8 }}
-                >
-                  <CheckCircle className="w-28 h-28 text-brand-emerald drop-shadow-[0_0_20px_rgba(16,185,129,1)]" />
-                </motion.div>
-
-                {/* Orbital ring */}
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-                  className="absolute inset-[-20px] border border-dashed border-brand-emerald/20 rounded-full"
-                />
-              </motion.div>
-
-              <motion.div
-                initial={{ y: 60, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.8, duration: 1, ease: [0.16, 1, 0.3, 1] }}
-              >
-                <motion.h2
-                  animate={{
-                    letterSpacing: ["0.2em", "0.35em", "0.2em"],
-                    textShadow: [
-                      "0 0 15px rgba(16,185,129,0.4)",
-                      "0 0 40px rgba(16,185,129,0.7)",
-                      "0 0 15px rgba(16,185,129,0.4)"
-                    ]
-                  }}
-                  transition={{ duration: 5, repeat: Infinity }}
-                  className="text-8xl font-black tracking-widest text-white uppercase italic mb-8 flex flex-col items-center justify-center"
-                >
-                  <span className="text-3xl not-italic font-bold tracking-[0.8em] text-zinc-600 mb-4 opacity-60">SISTEMA</span>
-                  <div className="relative">
-                    ROTA <span className="text-brand-emerald">ELITE</span>
-                    <motion.div
-                      animate={{ left: ['-10%', '110%'], opacity: [0, 1, 0] }}
-                      transition={{ duration: 2, repeat: Infinity, delay: 1 }}
-                      className="absolute top-0 bottom-0 w-1 bg-brand-emerald/50 blur-sm"
-                    />
-                  </div>
-                </motion.h2>
-
-                <div className="flex items-center justify-center gap-6 mb-12">
-                  <div className="h-[1px] w-24 bg-gradient-to-r from-transparent via-brand-emerald/50 to-transparent" />
-                  <div className="flex gap-2">
-                    {[...Array(5)].map((_, i) => (
-                      <motion.div
-                        key={i}
-                        animate={{
-                          scale: [1, 1.5, 1],
-                          opacity: [0.3, 1, 0.3]
-                        }}
-                        transition={{ duration: 1.5, delay: i * 0.15, repeat: Infinity }}
-                        className="w-2 h-2 rounded-full bg-brand-emerald shadow-[0_0_8px_rgba(16,185,129,0.6)]"
-                      />
-                    ))}
-                  </div>
-                  <div className="h-[1px] w-24 bg-gradient-to-l from-transparent via-brand-emerald/50 to-transparent" />
-                </div>
-
-                <div className="relative inline-block">
-                  <p className="text-zinc-500 font-black uppercase tracking-[0.8em] text-[11px] opacity-70 max-w-lg mx-auto leading-relaxed">
-                    Logística Avançada • Otimização de Percurso • Máxima Eficiência
-                  </p>
-                  <motion.div
-                    animate={{ width: ['0%', '100%', '0%'] }}
-                    transition={{ duration: 4, repeat: Infinity }}
-                    className="absolute -bottom-2 left-0 h-[1px] bg-brand-emerald/30"
-                  />
-                </div>
-              </motion.div>
-            </div>
-
-            {/* Tech frame corners */}
-            <div className="absolute inset-10 pointer-events-none border border-white/5 rounded-[40px]">
-              <div className="absolute top-0 left-0 w-10 h-10 border-t-2 border-l-2 border-brand-emerald/30 rounded-tl-3xl" />
-              <div className="absolute top-0 right-0 w-10 h-10 border-t-2 border-r-2 border-brand-emerald/30 rounded-tr-3xl" />
-              <div className="absolute bottom-0 left-0 w-10 h-10 border-b-2 border-l-2 border-brand-emerald/30 rounded-bl-3xl" />
-              <div className="absolute bottom-0 right-0 w-10 h-10 border-b-2 border-r-2 border-brand-emerald/30 rounded-br-3xl" />
-            </div>
-
-            {/* Scanning line effect - More subtle and techy */}
-            <motion.div
-              animate={{ top: ['-10%', '110%'] }}
-              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-              className="absolute left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-brand-emerald/40 to-transparent z-0"
-            />
-
-            {/* Particles or tech accents */}
-            <div className="absolute inset-0 pointer-events-none">
-              {[...Array(5)].map((_, i) => (
-                <motion.div
-                  key={i}
-                  animate={{
-                    y: [0, -100],
-                    opacity: [0, 1, 0],
-                    x: [0, (i - 2) * 50]
-                  }}
-                  transition={{
-                    duration: 2 + Math.random(),
-                    repeat: Infinity,
-                    delay: i * 0.4
-                  }}
-                  className="absolute bottom-0 left-1/2 w-1 h-1 bg-brand-emerald rounded-full"
-                />
-              ))}
-            </div>
-          </motion.div>
-        )}
       </AnimatePresence>
 
       {/* Sidebar (Form) */}
