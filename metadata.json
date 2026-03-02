@@ -1,0 +1,7 @@
+{
+  "name": "Rota Limpa",
+  "description": "Otimização de rotas e precificação de fretes para motoristas profissionais.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
