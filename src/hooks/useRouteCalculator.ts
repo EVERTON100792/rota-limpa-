@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Stop, VehicleConfig, FinancialSummary, RouteData } from '../types';
+import { Stop, VehicleConfig, FinancialSummary, RouteData, Expense } from '../types';
 import { getRoute, optimizeRoute } from '../services/osrmService';
 import { normalizeAddresses, geocodeAddress, sleep } from '../services/geocodingService';
 
@@ -41,6 +41,10 @@ export const useRouteCalculator = () => {
   const [avoidUnpaved, setAvoidUnpaved] = useState(() => {
     const saved = localStorage.getItem('rota_limpa_avoidUnpaved');
     return saved ? JSON.parse(saved) : false;
+  });
+  const [expenses, setExpenses] = useState<Expense[]>(() => {
+    const saved = localStorage.getItem('rota_limpa_expenses');
+    return saved ? JSON.parse(saved) : [];
   });
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
@@ -85,6 +89,10 @@ export const useRouteCalculator = () => {
     localStorage.setItem('rota_limpa_avoidUnpaved', JSON.stringify(avoidUnpaved));
   }, [avoidUnpaved]);
 
+  useEffect(() => {
+    localStorage.setItem('rota_limpa_expenses', JSON.stringify(expenses));
+  }, [expenses]);
+
   // Initialize base stop with current location if possible and not already set
   useEffect(() => {
     const savedBaseStr = localStorage.getItem('rota_limpa_baseStop');
@@ -116,8 +124,12 @@ export const useRouteCalculator = () => {
     const revenue = distanceKm * vehicleConfig.freightRate;
     // Fuel Cost = (Distance / Consumption) * Fuel Price
     const fuelCost = (distanceKm / vehicleConfig.consumption) * vehicleConfig.fuelPrice;
-    // Net Profit = Revenue - Fuel Cost - Tolls
-    const netProfit = revenue - fuelCost - tolls;
+    
+    // Total Expenses
+    const totalExpenses = expenses.reduce((sum, exp) => sum + exp.amount, 0);
+
+    // Net Profit = Revenue - Fuel Cost - Tolls - totalExpenses
+    const netProfit = revenue - fuelCost - tolls - totalExpenses;
 
     return {
       totalDistanceKm: distanceKm,
@@ -125,9 +137,10 @@ export const useRouteCalculator = () => {
       fuelCost,
       revenue,
       tolls,
+      totalExpenses,
       netProfit
     };
-  }, [routeData, vehicleConfig, tolls, manualDistanceKm]);
+  }, [routeData, vehicleConfig, tolls, manualDistanceKm, expenses]);
 
   const updateRoute = async (currentStops: Stop[], currentBase: Stop | null = baseStop, roundTrip: boolean = isRoundTrip, shouldAvoidUnpaved: boolean = avoidUnpaved) => {
     if (!currentBase) {
@@ -379,6 +392,8 @@ export const useRouteCalculator = () => {
     handleOptimize,
     handleImport,
     reorderStops,
-    updateRoute
+    updateRoute,
+    expenses,
+    setExpenses
   };
 };

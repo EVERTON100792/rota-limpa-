@@ -27,6 +27,7 @@ import { ImportModal } from './components/ImportModal';
 import { CheckoutModal } from './components/CheckoutModal';
 import { HistoryModal } from './components/HistoryModal';
 import { SettingsModal } from './components/SettingsModal';
+import { ExpenseModal } from './components/ExpenseModal';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { SortableStopItem } from './components/SortableStopItem';
 import { useRouteCalculator } from './hooks/useRouteCalculator';
@@ -76,7 +77,9 @@ export default function App() {
     handleOptimize,
     handleImport,
     reorderStops,
-    updateRoute
+    updateRoute,
+    expenses,
+    setExpenses
   } = useRouteCalculator();
 
   const sensors = useSensors(
@@ -105,6 +108,7 @@ export default function App() {
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isExpenseOpen, setIsExpenseOpen] = useState(false);
   const [history, setHistory] = useState<TripHistory[]>([]);
 
   // Load history from localStorage
@@ -125,7 +129,8 @@ export default function App() {
       date: new Date().toISOString(),
       config: vehicleConfig,
       summary: financialSummary,
-      stops: stops
+      stops: stops,
+      expenses: expenses
     };
     const newHistory = [newTrip, ...history];
     setHistory(newHistory);
@@ -328,6 +333,23 @@ export default function App() {
                   </p>
                 </div>
               </div>
+
+              {/* Expense Button */}
+              <div className="mt-4 pt-4 border-t border-zinc-800/50">
+                <button
+                  onClick={() => setIsExpenseOpen(true)}
+                  className="w-full py-2.5 bg-zinc-800/50 hover:bg-zinc-800 active:scale-95 border border-zinc-700/50 hover:border-zinc-700 rounded-xl flex items-center justify-between px-4 transition-all group"
+                >
+                  <div className="flex items-center gap-2">
+                    <Plus className="w-4 h-4 text-brand-red" />
+                    <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest group-hover:text-white transition-colors">
+                      Despesas Desta Rota <span className={`ml-1 ${financialSummary.totalExpenses > 0 ? 'text-brand-red' : 'text-zinc-500'}`}>(R$ {financialSummary.totalExpenses.toFixed(2)})</span>
+                    </span>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400 transition-colors" />
+                </button>
+              </div>
+
 
               {/* Route Options Toggles */}
               <div className="flex items-center gap-4 pt-4 mt-4 border-t border-zinc-800/50">
@@ -604,6 +626,14 @@ export default function App() {
         config={vehicleConfig}
         isRoundTrip={isRoundTrip}
         manualDistanceKm={manualDistanceKm}
+      />
+
+      <ExpenseModal
+        isOpen={isExpenseOpen}
+        onClose={() => setIsExpenseOpen(false)}
+        expenses={expenses}
+        onAddExpense={(exp) => setExpenses(prev => [exp, ...prev])}
+        onRemoveExpense={(id) => setExpenses(prev => prev.filter(e => e.id !== id))}
       />
 
       <HistoryModal

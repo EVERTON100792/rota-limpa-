@@ -35,12 +35,22 @@ export interface RouteData {
   totalUnpavedDistance?: number;
 }
 
+export interface Expense {
+  id: string;
+  type: 'Combustível' | 'Alimentação' | 'Manutenção' | 'Pedágio Extra' | 'Outro';
+  amount: number;
+  description: string;
+  date: string;
+  photoDataUrl?: string; // base64 representation of the photo
+}
+
 export interface FinancialSummary {
   totalDistanceKm: number;
   totalDurationMin: number;
   fuelCost: number;
   revenue: number;
   tolls: number;
+  totalExpenses: number;
   netProfit: number;
 }
 
@@ -50,4 +60,5 @@ export interface TripHistory {
   config: VehicleConfig;
   summary: FinancialSummary;
   stops: Stop[];
+  expenses: Expense[];
 }
