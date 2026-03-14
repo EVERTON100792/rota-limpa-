@@ -65,7 +65,7 @@ const OVERPASS_CACHE = new Map<string, { data: any, timestamp: number }>();
 const CACHE_TTL = 1000 * 60 * 30; // 30 minutes
 
 // Track instance health to avoid 429 loops
-const OVERPASS_INSTANCE_STATUS = new Map<string, { lastFail: number, failCount: number }>();
+const OVERPASS_INSTANCE_STATUS = new Map<string, { lastFail: number, failCount: number, isRateLimited?: boolean }>();
 const BLACKLIST_TIME = 1000 * 60 * 2; // 2 minutes penalty
 
 // Global Semaphore to ensure only one Overpass request is active at a time
@@ -181,10 +181,15 @@ async function fetchFromOverpass(query: string, signal?: AbortSignal) {
         }
 
         if (response.status === 429 || response.status >= 500) {
+          const isRateLimited = response.status === 429;
           OVERPASS_INSTANCE_STATUS.set(instance, { 
             lastFail: now(), 
-            failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1 
+            failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1,
+            isRateLimited
           });
+          if (isRateLimited) {
+            await new Promise(r => setTimeout(r, 1000));
+          }
           continue;
         }
       } catch (error: any) {
@@ -193,7 +198,8 @@ async function fetchFromOverpass(query: string, signal?: AbortSignal) {
         if (error.name === 'AbortError') throw error;
         OVERPASS_INSTANCE_STATUS.set(instance, { 
           lastFail: now(), 
-          failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1 
+          failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1,
+          isRateLimited: false
         });
       }
     }
@@ -414,17 +420,30 @@ async function handleTollDetection(geometry: string, osrmTolls: any[], stops: St
 
   const routeCoords = decodePolyline(geometry);
 
-  // Find the vertex index where the return leg starts
+  // Find the vertex index for the return leg
+  // Strategy: The return point is the stop geographically FURTHEST from the base (stops[0])
   let returnVertexIndex = -1;
-  if (isRoundTrip && stops.length > 2) {
-    const lastDelivery = stops[stops.length - 2];
+  if (isRoundTrip && stops.length >= 2) {
+    const base = stops[0];
+    let maxDist = -1;
+    let furthestStop = stops[1] || stops[0];
+
+    // Find stop that is geographically most distant from base
+    for (let i = 1; i < stops.length - 1; i++) {
+        const d = calculateDistance([base.lat, base.lng], [stops[i].lat, stops[i].lng]);
+        if (d > maxDist) {
+            maxDist = d;
+            furthestStop = stops[i];
+        }
+    }
+
+    // Now find the LAST occurrence of this furthest point in the geometry 
+    // to determine where the return journey theoretically begins
     let minDist = Infinity;
-    // We only look for the last delivery point in the polyline
-    // To be more precise, it's likely after the middle of the route coords if it's a round trip
-    const startIdx = Math.floor(routeCoords.length / 4); 
-    for (let i = startIdx; i < routeCoords.length; i++) {
-        const d = Math.pow(routeCoords[i][0] - lastDelivery.lat, 2) + Math.pow(routeCoords[i][1] - lastDelivery.lng, 2);
-        if (d < minDist) {
+    const startSearchIdx = Math.floor(routeCoords.length / 4); // Optimization
+    for (let i = startSearchIdx; i < routeCoords.length; i++) {
+        const d = Math.pow(routeCoords[i][0] - furthestStop.lat, 2) + Math.pow(routeCoords[i][1] - furthestStop.lng, 2);
+        if (d <= minDist) {
             minDist = d;
             returnVertexIndex = i;
         }
