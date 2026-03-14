@@ -466,7 +466,7 @@ export default function App() {
                 </div>
                 <button
                   onClick={async () => {
-                    const text = `🛣️ *Solicitação de Sem Parar*\n\n*Total de Praças:* ${routeData.tolls!.length}\n\n*Localizações:*\n${routeData.tolls!.map((t, i) => `${i + 1}. ${t.name}`).join('\n')}`;
+                    const text = `🛣️ *Solicitação de Sem Parar*\n\n*Total de Cobranças:* ${routeData.tollCount}\n\n*Localizações:*\n${routeData.tolls!.map((t, i) => `${i + 1}. ${t.name}${t.direction === 'ambos' ? ' (Ida e Volta)' : t.direction === 'volta' ? ' (Retorno)' : ' (Ida)'}`).join('\n')}`;
                     try {
                       await navigator.clipboard.writeText(text);
                       alert('Lista de pedágios copiada!');
@@ -493,7 +493,17 @@ export default function App() {
                 {routeData.tolls.map((toll, index) => (
                   <div key={index} className="flex items-center gap-2 text-xs text-zinc-400">
                     <span className="text-[9px] font-bold text-amber-500/50 w-4">{index + 1}.</span>
-                    <span className="truncate">{toll.name}</span>
+                    <span className="truncate flex-1">{toll.name}</span>
+                    {toll.direction === 'ambos' ? (
+                      <div className="flex items-center gap-0.5 ml-auto">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><path d="m19 12-7 7-7-7"/><path d="M12 5v14"/></svg>
+                      </div>
+                    ) : toll.direction === 'volta' ? (
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto"><path d="m19 12-7 7-7-7"/><path d="M12 5v14"/></svg>
+                    ) : (
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" className="ml-auto"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+                    )}
                   </div>
                 ))}
               </div>

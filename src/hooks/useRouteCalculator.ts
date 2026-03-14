@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { Stop, VehicleConfig, FinancialSummary, RouteData, Expense } from '../types';
 import { getRoute, optimizeRoute } from '../services/osrmService';
 import { normalizeAddresses, geocodeAddress, sleep } from '../services/geocodingService';
@@ -142,41 +142,51 @@ export const useRouteCalculator = () => {
     };
   }, [routeData, vehicleConfig, tolls, manualDistanceKm, expenses]);
 
+  // Keep track of ongoing operations to allow cancellation
+  const routeAbortController = useRef<AbortController | null>(null);
+  const optimizeAbortController = useRef<AbortController | null>(null);
+
+  const getSignal = (ref: { current: AbortController | null }) => {
+    if (ref.current) {
+      ref.current.abort();
+    }
+    ref.current = new AbortController();
+    return ref.current.signal;
+  };
+
   const updateRoute = async (currentStops: Stop[], currentBase: Stop | null = baseStop, roundTrip: boolean = isRoundTrip, shouldAvoidUnpaved: boolean = avoidUnpaved) => {
-    if (!currentBase) {
+    if (!currentBase || currentStops.length === 0) {
       setRouteData(null);
       return;
     }
 
-    if (currentStops.length === 0) {
-      setRouteData(null);
-      return;
-    }
-
+    const signal = getSignal(routeAbortController);
     setIsLoading(true);
-    setRouteData(null); // Clear old route data immediately to prevent "stuck" routes
     setLoadingMessage('Traçando rota...');
 
     // Route always starts at base
     const stopsForRoute = [currentBase, ...currentStops];
-
-    // If round trip, we add the base to the end as well
     if (roundTrip) {
       stopsForRoute.push(currentBase);
     }
 
     try {
-      const data = await getRoute(stopsForRoute, shouldAvoidUnpaved);
+      const data = await getRoute(stopsForRoute, shouldAvoidUnpaved, signal);
+      
+      // Check if this request was superseded or cancelled
+      if (signal.aborted) return;
+
       if (data) {
         setRouteData(data);
       } else {
         setRouteData(null);
-        alert("Falha ao traçar a rota. Os servidores de roteamento podem estar indisponíveis no momento ou a distância é muito grande. Tente novamente em alguns instantes.");
+        alert("Falha ao traçar a rota. Tente novamente em alguns instantes.");
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error.name === 'AbortError') return;
       console.error("Erro fatal ao calcular rota:", error);
       setRouteData(null);
-      alert("Erro ao calcular a rota. Ocorreu uma instabilidade na comunicação com nossos servidores de roteamento. Por favor, tente novamente.");
+      alert("Erro ao calcular a rota. Por favor, tente novamente.");
     } finally {
       setIsLoading(false);
     }
@@ -230,7 +240,18 @@ export const useRouteCalculator = () => {
 
       if (newStops.length > 0) {
         setStops(newStops);
-        await updateRoute(newStops);
+        setLoadingMessage('Otimizando sequência...');
+        
+        // Auto-optimize after import, passing the brand new stops directly 
+        // to avoid waiting for the async setStops state update
+        if (newStops.length >= 2) {
+          const optimized = await handleOptimize(newStops);
+          if (!optimized) {
+            await updateRoute(newStops);
+          }
+        } else {
+          await updateRoute(newStops);
+        }
       }
     } catch (e) {
       console.error("Error during import:", e);
@@ -241,27 +262,31 @@ export const useRouteCalculator = () => {
     }
   };
 
-  const handleOptimize = async (): Promise<boolean> => {
-    if (!baseStop || stops.length < 2) return false;
+  const handleOptimize = async (stopsToOptimize?: Stop[]): Promise<boolean> => {
+    const currentStops = stopsToOptimize || stops;
+    if (!baseStop || currentStops.length < 2) return false;
+
+    const signal = getSignal(optimizeAbortController);
     setIsLoading(true);
     setRouteData(null); // Clear old route data immediately
     setLoadingMessage('Otimizando sequência...');
 
     try {
       // Optimize starting from base
-      const data = await optimizeRoute([baseStop, ...stops], avoidUnpaved, isRoundTrip);
+      const data = await optimizeRoute([baseStop, ...currentStops], avoidUnpaved, isRoundTrip, signal);
       if (data) {
         // The first stop in optimized data will be the base (since it's the first in the input)
         // We extract the rest as deliveries
-        const optimizedDeliveries = data.stops.slice(1).map((s, idx) => ({ ...s, order: idx }));
+        const optimizedDeliveries = data.stops.slice(1).map((s: Stop, idx: number) => ({ ...s, order: idx }));
         setStops(optimizedDeliveries);
 
         // Re-run updateRoute to handle roundTrip geometry correctly
-        await updateRoute(optimizedDeliveries);
+        await updateRoute(optimizedDeliveries, baseStop, isRoundTrip, avoidUnpaved);
         return true;
       }
       return false;
-    } catch (e) {
+    } catch (e: any) {
+      if (e.name === 'AbortError') return false;
       console.error("Optimization failed:", e);
       alert("Falha ao otimizar a rota. O servidor pode estar indisponível.");
       return false;

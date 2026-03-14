@@ -60,64 +60,154 @@ const OVERPASS_INSTANCES = [
   'https://overpass.kumi.systems/api/interpreter'
 ];
 
-async function fetchFromOverpass(query: string) {
-  let lastError = null;
+// Cache to avoid repeated heavy queries to Overpass
+const OVERPASS_CACHE = new Map<string, { data: any, timestamp: number }>();
+const CACHE_TTL = 1000 * 60 * 30; // 30 minutes
 
-  // Shuffle instances to distribute load and avoid immediate 429 on the main instance
-  const instancesToTry = [...OVERPASS_INSTANCES].sort(() => Math.random() - 0.5);
-  let delay = 1000;
+// Track instance health to avoid 429 loops
+const OVERPASS_INSTANCE_STATUS = new Map<string, { lastFail: number, failCount: number }>();
+const BLACKLIST_TIME = 1000 * 60 * 2; // 2 minutes penalty
 
-  // Try different instances
-  for (let i = 0; i < instancesToTry.length; i++) {
-    const instance = instancesToTry[i];
-    const controller = new AbortController();
-    // Increase timeout to 20s as most queries are complex
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+// Global Semaphore to ensure only one Overpass request is active at a time
+// This prevents 429/504 errors by sequencing requests
+class Semaphore {
+  private queue: (() => void)[] = [];
+  private activeCount = 0;
+  private maxActive = 1;
 
-    try {
-      // Delay before trying next instance, increasing exponentially
-      if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 1.5; // Exponential backoff for next iteration
-      }
-
-      const response = await fetch(instance, {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        return await response.json();
-      }
-
-      if (response.status === 429 || response.status === 504 || response.status === 502 || response.status === 503) {
-        // Silenciando o alerta no console, visto que o fallback já lida perfeitamente com 429 mudando a instância
-        // console.warn(`Overpass instance ${instance} failed with status ${response.status}, trying next...`);
-        continue;
-      }
-
-      console.warn(`Overpass instance ${instance} failed with status ${response.status}`);
-    } catch (error: any) {
-      clearTimeout(timeoutId);
-      lastError = error;
-      if (error.name === 'AbortError') {
-        console.warn(`Overpass instance ${instance} timed out (30s), trying next...`);
-      } else {
-        console.warn(`Overpass instance ${instance} failed:`, error);
-      }
+  async acquire() {
+    if (this.activeCount < this.maxActive) {
+      this.activeCount++;
+      return Promise.resolve();
     }
+    return new Promise<void>(resolve => {
+      this.queue.push(resolve);
+    });
   }
 
-  throw lastError || new Error('All Overpass instances failed');
+  release() {
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      if (next) next();
+    } else {
+      this.activeCount--;
+    }
+  }
 }
 
-async function fetchTollsFromOverpass(geometry: string) {
+const overpassSemaphore = new Semaphore();
+
+function processGroupedTolls(sortedEncounters: any[], returnVertexIndex: number = -1) {
+  const groupedTolls: { lat: number; lng: number; name: string; direction: 'ida' | 'volta' | 'ambos'; firstEncounter: number }[] = [];
+  
+  sortedEncounters.forEach(enc => {
+    const direction: 'ida' | 'volta' = (returnVertexIndex !== -1 && enc.progressIndex > returnVertexIndex) ? 'volta' : 'ida';
+    
+    const existing = groupedTolls.find(t => 
+      Math.abs(t.lat - enc.lat) < 0.0001 && Math.abs(t.lng - enc.lng) < 0.0001
+    );
+    
+    if (existing) {
+      if (existing.direction !== direction) {
+        existing.direction = 'ambos';
+      }
+    } else {
+      groupedTolls.push({
+        lat: enc.lat,
+        lng: enc.lng,
+        name: enc.name,
+        direction: direction,
+        firstEncounter: enc.progressIndex
+      });
+    }
+  });
+  return groupedTolls;
+}
+
+async function fetchFromOverpass(query: string, signal?: AbortSignal) {
+  // Check cache first
+  const cached = OVERPASS_CACHE.get(query);
+  if (cached && (now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+
+  await overpassSemaphore.acquire();
+  
+  try {
+    let lastError = null;
+    const nowTimestamp = now();
+
+    // Filter out blacklisted instances
+    const availableInstances = OVERPASS_INSTANCES.filter(inst => {
+      const status = OVERPASS_INSTANCE_STATUS.get(inst);
+      if (!status) return true;
+      return (nowTimestamp - status.lastFail) > BLACKLIST_TIME;
+    });
+
+    const instancesToTry = availableInstances.length > 0 
+      ? [...availableInstances].sort(() => Math.random() - 0.5)
+      : [...OVERPASS_INSTANCES].sort(() => Math.random() - 0.5);
+
+    let delay = 300; 
+
+    for (let i = 0; i < instancesToTry.length; i++) {
+      if (signal?.aborted) throw new Error('AbortError');
+      const instance = instancesToTry[i];
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 1.5; 
+        }
+
+        const response = await fetch(instance, {
+          method: 'POST',
+          body: `data=${encodeURIComponent(query)}`,
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          signal: signal || controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          const data = await response.json();
+          OVERPASS_CACHE.set(query, { data, timestamp: now() });
+          OVERPASS_INSTANCE_STATUS.delete(instance);
+          return data;
+        }
+
+        if (response.status === 429 || response.status >= 500) {
+          OVERPASS_INSTANCE_STATUS.set(instance, { 
+            lastFail: now(), 
+            failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1 
+          });
+          continue;
+        }
+      } catch (error: any) {
+        clearTimeout(timeoutId);
+        lastError = error;
+        if (error.name === 'AbortError') throw error;
+        OVERPASS_INSTANCE_STATUS.set(instance, { 
+          lastFail: now(), 
+          failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1 
+        });
+      }
+    }
+
+    return { elements: [] };
+  } finally {
+    overpassSemaphore.release();
+  }
+}
+
+// Utility to keep current timestamp
+function now() { return Date.now(); }
+
+async function fetchTollsFromOverpass(geometry: string, signal?: AbortSignal) {
   try {
     const coords = decodePolyline(geometry);
     if (coords.length === 0) return [];
@@ -130,17 +220,17 @@ async function fetchTollsFromOverpass(geometry: string) {
       if (lng > maxLng) maxLng = lng;
     });
 
-    // Add a small buffer to the bounding box (approx 5km)
+    // Buffer de ~5km para garantir que pegamos pedágios próximos
     minLat -= 0.05; maxLat += 0.05;
     minLng -= 0.05; maxLng += 0.05;
 
     const area = (maxLat - minLat) * (maxLng - minLng);
-
     let query = '';
+    
+    // Se a área for muito grande (rota longa), usamos o 'around' na linha simplificada
     if (area > 50) {
-      // For very long routes, use polyline around query to avoid timeouts
-      const simplified = simplifyPolyline(coords, 0.05); // ~5km tolerance
-      const polyStr = simplified.map(p => `${p[0]},${p[1]}`).join(',');
+      const simplified = simplifyPolyline(coords, 0.05); 
+      const polyStr = simplified.map(p => `${p[0]},${p[1]}`).join(' ');
 
       query = `
         [out:json][timeout:25];
@@ -161,71 +251,22 @@ async function fetchTollsFromOverpass(geometry: string) {
       `;
     }
 
-    const data = await fetchFromOverpass(query);
-    const allTolls = data.elements.map((e: any) => ({
+    const data = await fetchFromOverpass(query, signal);
+    if (!data || !data.elements) return [];
+    
+    return data.elements.map((e: any) => ({
       lat: e.lat || e.center?.lat,
       lng: e.lon || e.center?.lon,
       name: e.tags?.name || 'Pedágio'
     })).filter((e: any) => e.lat && e.lng);
-
-    // Filter tolls close to the route
-    const THRESHOLD = 0.0000002; // approx 50 meters radius (degrees squared)
-
-    const routeTolls = allTolls.filter((toll: any) => {
-      const p = [toll.lat, toll.lng];
-      const cosLat = Math.cos(p[0] * Math.PI / 180);
-
-      for (let i = 0; i < coords.length - 1; i++) {
-        const v = coords[i];
-        const w = coords[i + 1];
-
-        const dx = (w[1] - v[1]) * cosLat;
-        const dy = w[0] - v[0];
-        const l2 = dx * dx + dy * dy;
-
-        const px = (p[1] - v[1]) * cosLat;
-        const py = p[0] - v[0];
-
-        let dist2 = 0;
-        if (l2 === 0) {
-          dist2 = px * px + py * py;
-        } else {
-          let t = (px * dx + py * dy) / l2;
-          t = Math.max(0, Math.min(1, t));
-          const projX = t * dx;
-          const projY = t * dy;
-          dist2 = Math.pow(px - projX, 2) + Math.pow(py - projY, 2);
-        }
-
-        if (dist2 < THRESHOLD) {
-          return true;
-        }
-      }
-      return false;
-    });
-
-    // Deduplicate tolls that are very close to each other (e.g. opposite directions)
-    const uniqueTolls: any[] = [];
-    routeTolls.forEach((toll: any) => {
-      const isDuplicate = uniqueTolls.some(u => {
-        const dLat = u.lat - toll.lat;
-        const dLng = u.lng - toll.lng;
-        return (dLat * dLat + dLng * dLng) < 0.00001; // approx 300m
-      });
-      if (!isDuplicate) {
-        uniqueTolls.push(toll);
-      }
-    });
-
-    // Return unique tolls directly since we already have the name from Overpass
-    return uniqueTolls;
   } catch (error) {
+    if ((error as any).name === 'AbortError') throw error;
     console.error('Error fetching tolls from Overpass:', error);
     return [];
   }
 }
 
-async function fetchUnpavedFromOverpass(geometry: string) {
+async function fetchUnpavedFromOverpass(geometry: string, signal?: AbortSignal) {
   try {
     const coords = decodePolyline(geometry);
     if (coords.length === 0) return { segments: [], totalDistance: 0 };
@@ -238,41 +279,23 @@ async function fetchUnpavedFromOverpass(geometry: string) {
       if (lng > maxLng) maxLng = lng;
     });
 
-    // Add a small buffer to the bounding box (approx 5km)
     minLat -= 0.05; maxLat += 0.05;
     minLng -= 0.05; maxLng += 0.05;
 
-    const area = (maxLat - minLat) * (maxLng - minLng);
+    let query = `
+      [out:json][timeout:15];
+      (
+        way["highway"~"track|unclassified|path"]["surface"~"unpaved|dirt|earth|ground|gravel|sand|clay|fine_gravel|wood|grass|mud"](${minLat},${minLng},${maxLat},${maxLng});
+        way["highway"="track"](${minLat},${minLng},${maxLat},${maxLng});
+      );
+      out body;
+      >;
+      out skel qt;
+    `;
 
-    let query = '';
-    if (area > 20) {
-      const simplified = simplifyPolyline(coords, 0.05); // ~5km tolerance
-      const polyStr = simplified.map(p => `${p[0]},${p[1]}`).join(',');
+    const data = await fetchFromOverpass(query, signal);
+    if (!data || !data.elements) return { segments: [], totalDistance: 0 };
 
-      query = `
-        [out:json][timeout:25];
-        (
-          way["highway"~"track|unclassified|path"]["surface"~"unpaved|dirt|earth|ground|gravel|sand|clay|fine_gravel|wood|grass|mud"](around:5000,${polyStr});
-          way["highway"="track"](around:5000,${polyStr});
-        );
-        out body;
-        >;
-        out skel qt;
-      `;
-    } else {
-      query = `
-        [out:json][timeout:15];
-        (
-          way["highway"~"track|unclassified|path"]["surface"~"unpaved|dirt|earth|ground|gravel|sand|clay|fine_gravel|wood|grass|mud"](${minLat},${minLng},${maxLat},${maxLng});
-          way["highway"="track"](${minLat},${minLng},${maxLat},${maxLng});
-        );
-        out body;
-        >;
-        out skel qt;
-      `;
-    }
-
-    const data = await fetchFromOverpass(query);
     const nodesMap: Record<number, [number, number]> = {};
     data.elements.forEach((e: any) => {
       if (e.type === 'node') {
@@ -282,30 +305,34 @@ async function fetchUnpavedFromOverpass(geometry: string) {
 
     const unpavedWays = data.elements
       .filter((e: any) => e.type === 'way')
-      .map((w: any) => w.nodes.map((nodeId: number) => nodesMap[nodeId]).filter(Boolean));
+      .map((w: any) => ({
+        nodes: w.nodes.map((nodeId: number) => nodesMap[nodeId]).filter(Boolean),
+        bbox: calculateBBox(w.nodes.map((nodeId: number) => nodesMap[nodeId]).filter(Boolean))
+      }));
 
-    const THRESHOLD = 0.000005; // approx 250 meters squared
+    const THRESHOLD = 0.000005; // approx 250m^2
     const unpavedSegments: { coordinates: [number, number][]; distance: number }[] = [];
     let totalUnpavedDistance = 0;
 
-    // For each segment in the route, check if it's close to any unpaved way
     for (let i = 0; i < coords.length - 1; i++) {
-      // Prevent UI freeze: allow the event loop to breathe every 100 segments
-      if (i % 100 === 0) {
+      if (signal?.aborted) throw new Error('AbortError');
+      if (i % 200 === 0) {
         await new Promise(resolve => setTimeout(resolve, 0));
       }
 
       const v = coords[i];
       const w = coords[i + 1];
-      const p = [(v[0] + w[0]) / 2, (v[1] + w[1]) / 2]; // Midpoint of segment
+      const segBBox = calculateBBox([v, w]);
+      const p = [(v[0] + w[0]) / 2, (v[1] + w[1]) / 2];
 
       let isUnpaved = false;
       for (const way of unpavedWays) {
-        for (let j = 0; j < way.length - 1; j++) {
-          const wv = way[j];
-          const ww = way[j + 1];
+        if (!bboxesIntersect(segBBox, way.bbox, 0.01)) continue;
 
-          // Distance from midpoint p to segment (wv, ww)
+        for (let j = 0; j < way.nodes.length - 1; j++) {
+          const wv = way.nodes[j];
+          const ww = way.nodes[j + 1];
+
           const cosLat = Math.cos(p[0] * Math.PI / 180);
           const dx = (ww[1] - wv[1]) * cosLat;
           const dy = ww[0] - wv[0];
@@ -318,11 +345,8 @@ async function fetchUnpavedFromOverpass(geometry: string) {
           if (l2 === 0) {
             dist2 = px * px + py * py;
           } else {
-            let t = (px * dx + py * dy) / l2;
-            t = Math.max(0, Math.min(1, t));
-            const projX = t * dx;
-            const projY = t * dy;
-            dist2 = Math.pow(px - projX, 2) + Math.pow(py - projY, 2);
+            let t = Math.max(0, Math.min(1, (px * dx + py * dy) / l2));
+            dist2 = Math.pow(px - (t * dx), 2) + Math.pow(py - (t * dy), 2);
           }
 
           if (dist2 < THRESHOLD) {
@@ -334,327 +358,335 @@ async function fetchUnpavedFromOverpass(geometry: string) {
       }
 
       if (isUnpaved) {
-        // Calculate distance of this segment
-        const R = 6371e3; // metres
-        const φ1 = v[0] * Math.PI / 180;
-        const φ2 = w[0] * Math.PI / 180;
-        const Δφ = (w[0] - v[0]) * Math.PI / 180;
-        const Δλ = (w[1] - v[1]) * Math.PI / 180;
-        const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-          Math.cos(φ1) * Math.cos(φ2) *
-          Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const d = R * c;
-
+        const d = calculateDistance(v, w);
         totalUnpavedDistance += d;
-        unpavedSegments.push({
-          coordinates: [v, w],
-          distance: d
-        });
+        unpavedSegments.push({ coordinates: [v, w], distance: d });
       }
     }
 
     return { segments: unpavedSegments, totalDistance: totalUnpavedDistance };
   } catch (error) {
+    if ((error as any).name === 'AbortError') throw error;
     console.error('Error fetching unpaved from Overpass:', error);
     return { segments: [], totalDistance: 0 };
   }
 }
 
-export const getRoute = async (stops: Stop[], avoidUnpaved: boolean = false) => {
+function calculateBBox(points: [number, number][]) {
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+  points.forEach(p => {
+    if (p[0] < minLat) minLat = p[0];
+    if (p[0] > maxLat) maxLat = p[0];
+    if (p[1] < minLng) minLng = p[1];
+    if (p[1] > maxLng) maxLng = p[1];
+  });
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+function bboxesIntersect(a: any, b: any, buffer = 0) {
+  return !(a.maxLat + buffer < b.minLat || 
+           a.minLat - buffer > b.maxLat || 
+           a.maxLng + buffer < b.minLng || 
+           a.minLng - buffer > b.maxLng);
+}
+
+function calculateDistance(v: [number, number], w: [number, number]) {
+  const R = 6371e3;
+  const φ1 = v[0] * Math.PI / 180;
+  const φ2 = w[0] * Math.PI / 180;
+  const Δφ = (w[0] - v[0]) * Math.PI / 180;
+  const Δλ = (w[1] - v[1]) * Math.PI / 180;
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Shared logic to detect and group tolls effectively
+ */
+async function handleTollDetection(geometry: string, osrmTolls: any[], stops: Stop[], isRoundTrip: boolean, signal?: AbortSignal) {
+  const [overpassTolls, unpavedData] = await Promise.all([
+    withTimeout(fetchTollsFromOverpass(geometry, signal), 15000, []),
+    withTimeout(fetchUnpavedFromOverpass(geometry, signal), 15000, { segments: [], totalDistance: 0 })
+  ]);
+
+  const routeCoords = decodePolyline(geometry);
+
+  // Find the vertex index where the return leg starts
+  let returnVertexIndex = -1;
+  if (isRoundTrip && stops.length > 2) {
+    const lastDelivery = stops[stops.length - 2];
+    let minDist = Infinity;
+    // We only look for the last delivery point in the polyline
+    // To be more precise, it's likely after the middle of the route coords if it's a round trip
+    const startIdx = Math.floor(routeCoords.length / 4); 
+    for (let i = startIdx; i < routeCoords.length; i++) {
+        const d = Math.pow(routeCoords[i][0] - lastDelivery.lat, 2) + Math.pow(routeCoords[i][1] - lastDelivery.lng, 2);
+        if (d < minDist) {
+            minDist = d;
+            returnVertexIndex = i;
+        }
+    }
+  }
+
+  const encounters: { lat: number; lng: number; name: string; progressIndex: number }[] = [];
+  const allCandidates = [...osrmTolls, ...overpassTolls];
+  
+  const uniqueStations: any[] = [];
+  allCandidates.forEach(cand => {
+    const isDuplicate = uniqueStations.some(s => {
+      const dLat = s.lat - cand.lat;
+      const dLng = s.lng - cand.lng;
+      return (dLat * dLat + dLng * dLng) < 0.000005; // ~200m
+    });
+    if (!isDuplicate) uniqueStations.push(cand);
+  });
+
+  const THRESHOLD = 0.0000005; // ~80m radius
+  uniqueStations.forEach(station => {
+    const p = [station.lat, station.lng];
+    const cosLat = Math.cos(p[0] * Math.PI / 180);
+    const stationBBox = { 
+      minLat: p[0] - 0.01, maxLat: p[0] + 0.01, 
+      minLng: p[1] - 0.01, maxLng: p[1] + 0.01 
+    };
+
+    let lastEncounterIndex = -100;
+    for (let i = 0; i < routeCoords.length - 1; i++) {
+      if (i < lastEncounterIndex + 50) continue; 
+      const v = routeCoords[i];
+      const w = routeCoords[i + 1];
+      
+      const segBBox = {
+        minLat: Math.min(v[0], w[0]), maxLat: Math.max(v[0], w[0]),
+        minLng: Math.min(v[1], w[1]), maxLng: Math.max(v[1], w[1])
+      };
+
+      if (!bboxesIntersect(segBBox, stationBBox)) continue;
+
+      const dx = (w[1] - v[1]) * cosLat;
+      const dy = w[0] - v[0];
+      const l2 = dx * dx + dy * dy;
+
+      const px = (p[1] - v[1]) * cosLat;
+      const py = p[0] - v[0];
+
+      let dist2 = 0;
+      if (l2 === 0) {
+        dist2 = px * px + py * py;
+      } else {
+        let t = Math.max(0, Math.min(1, (px * dx + py * dy) / l2));
+        dist2 = Math.pow(px - (t * dx), 2) + Math.pow(py - (t * dy), 2);
+      }
+
+      if (dist2 < THRESHOLD) {
+        encounters.push({ ...station, progressIndex: i });
+        lastEncounterIndex = i;
+      }
+    }
+  });
+
+  const sortedEncounters = encounters.sort((a, b) => a.progressIndex - b.progressIndex);
+  const groupedTolls = processGroupedTolls(sortedEncounters, returnVertexIndex);
+  
+  // Enriquecer nomes com Photon de forma sequencial para evitar 429
+  await enrichTollNames(groupedTolls, signal);
+
+  return { 
+    groupedTolls, 
+    tollCount: encounters.length,
+    unpavedData
+  };
+}
+
+/**
+ * Sequential geocoding with throttling to respect Photon API
+ */
+async function enrichTollNames(tolls: any[], signal?: AbortSignal) {
+  for (let i = 0; i < tolls.length; i++) {
+    if (signal?.aborted) throw new Error('AbortError');
+    const t = tolls[i];
+    
+    // Jacarezinho fallback
+    const isJacarezinho = (Math.abs(t.lat - (-23.143)) < 0.05 && Math.abs(t.lng - (-49.972)) < 0.05) ||
+                        (Math.abs(t.lat - (-23.15)) < 0.05 && Math.abs(t.lng - (-49.98)) < 0.05);
+
+    try {
+      // Throttle: 200ms delay between calls
+      if (i > 0) await new Promise(resolve => setTimeout(resolve, 200));
+
+      const response = await fetch(`https://photon.komoot.io/reverse?lon=${t.lng}&lat=${t.lat}`, { signal });
+      if (response.ok) {
+        const data = await response.json();
+        if (data?.features?.length > 0) {
+          const props = data.features[0].properties;
+          let city = props.city || props.town || props.village || props.county || props.municipality;
+          const state = props.state;
+          if (city) {
+            if (isJacarezinho || city.toLowerCase().includes('jacarezinho')) {
+              t.name = `Pedágio - Jacarezinho / Ourinhos (SP/PR)`;
+            } else {
+              t.name = `Pedágio - Próximo a ${city}${state ? ` (${state})` : ''}`;
+            }
+            continue;
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as any).name === 'AbortError') throw e;
+    }
+
+    if (isJacarezinho) {
+      t.name = `Pedágio - Jacarezinho / Ourinhos (SP/PR)`;
+    }
+  }
+}
+
+export const getRoute = async (stops: Stop[], avoidUnpaved: boolean = false, signal?: AbortSignal) => {
   if (stops.length < 2) return null;
 
-  const coordinates = stops
-    .map(s => `${s.lng},${s.lat}`)
-    .join(';');
+  const coordinates = stops.map(s => `${s.lng},${s.lat}`).join(';');
 
   try {
-    let response = null;
     let data = null;
     let lastError = null;
 
     let urlsToTry = [...OSRM_BASE_URLS];
     if (avoidUnpaved) {
-      // Prioritize openstreetmap.de which supports exclude=unpaved
-      urlsToTry = [
-        'https://routing.openstreetmap.de/routed-car',
-        'https://router.project-osrm.org'
-      ];
+      urlsToTry = ['https://routing.openstreetmap.de/routed-car', 'https://router.project-osrm.org'];
     }
 
     for (const baseUrl of urlsToTry) {
+      if (signal?.aborted) throw new Error('AbortError');
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           let url = `${baseUrl}/route/v1/driving/${coordinates}?overview=full&geometries=polyline&steps=true&annotations=true`;
-
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s max para OSRM
-
-          // console.log(`OSRM Request (${baseUrl}): ${url}`);
-          response = await fetch(url, { signal: controller.signal });
-          clearTimeout(timeoutId);
-
+          const response = await fetch(url, { signal });
           if (response.ok) {
             data = await response.json();
             if (data.code === 'Ok') break;
-          } else {
-            const errorText = await response.text();
-            console.warn(`OSRM server ${baseUrl} returned ${response.status}: ${errorText}`);
           }
-        } catch (err) {
+        } catch (err: any) {
           lastError = err;
-          console.error(`OSRM attempt ${attempt + 1} failed for ${baseUrl}:`, err);
-          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1000));
+          if (err.name === 'AbortError') throw err;
+          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
-      if (data && data.code === 'Ok') break;
+      if (data?.code === 'Ok') break;
     }
 
-    if (!data || data.code !== 'Ok') {
-      throw lastError || new Error('Falha ao calcular rota em todos os servidores');
-    }
+    if (!data || data.code !== 'Ok') throw lastError || new Error('OSRM Failed');
 
-    // Count tolls by checking intersections in steps (grouping contiguous toll steps)
-    let tollCount = 0;
-    let inTollZone = false;
-    const tolls: { lat: number; lng: number; name: string }[] = [];
-
+    const osrmTolls: any[] = [];
     const legs = data.routes[0].legs || [];
     legs.forEach((leg: any) => {
-      const steps = leg.steps || [];
-      steps.forEach((step: any) => {
-        const nameLower = step.name?.toLowerCase() || '';
-        const refLower = step.ref?.toLowerCase() || '';
+      leg.steps?.forEach((step: any) => {
+        const nameLower = (step.name || '').toLowerCase();
         const hasToll = step.intersections?.some((i: any) => i.classes?.includes('toll')) ||
-          nameLower.includes('pedágio') || nameLower.includes('pedagio') || nameLower.includes('toll') ||
-          refLower.includes('pedágio') || refLower.includes('pedagio') || refLower.includes('toll');
-
+                       nameLower.includes('pedágio') || nameLower.includes('pedagio') || nameLower.includes('toll');
         if (hasToll) {
-          if (!inTollZone) {
-            tollCount++;
-            inTollZone = true;
-
-            // Find the first intersection with a toll
-            const tollLocation = step.intersections?.find((i: any) => i.classes?.includes('toll'))?.location ||
-              step.intersections?.[0]?.location ||
-              step.maneuver?.location;
-
-            if (tollLocation) {
-              const roadName = step.ref ? `Rodovia ${step.ref}` : (step.name ? step.name : 'Rodovia');
-              tolls.push({
-                lat: tollLocation[1],
-                lng: tollLocation[0],
-                name: roadName
-              });
-            }
-          }
-        } else {
-          inTollZone = false;
+          const loc = step.maneuver?.location;
+          if (loc) osrmTolls.push({ lat: loc[1], lng: loc[0], name: step.name || 'Pedágio' });
         }
       });
     });
 
     const geometry = data.routes[0].geometry;
-
-    // Parallelize toll and unpaved road detection with strict max 4s timeout to avoid browser freeze
-    const [overpassTolls, unpavedData] = await Promise.all([
-      withTimeout(fetchTollsFromOverpass(geometry), 4000, []),
-      withTimeout(fetchUnpavedFromOverpass(geometry), 4000, { segments: [], totalDistance: 0 })
-    ]);
-
-    // Merge tolls, preferring Overpass tolls as they are usually more accurate
-    if (overpassTolls.length > 0) {
-      overpassTolls.forEach(ot => {
-        const isDuplicate = tolls.some(t => {
-          const dLat = t.lat - ot.lat;
-          const dLng = t.lng - ot.lng;
-          return (dLat * dLat + dLng * dLng) < 0.00001; // approx 300m
-        });
-        if (!isDuplicate) {
-          tolls.push(ot);
-        }
-      });
-      tollCount = tolls.length;
-    }
-
-    // Reverse geocode tolls to get city names sequentially
-    if (tolls.length > 0) {
-      for (let i = 0; i < tolls.length; i++) {
-        const t = tolls[i];
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout per toll
-
-        try {
-          const response = await fetch(`https://photon.komoot.io/reverse?lon=${t.lng}&lat=${t.lat}`, {
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-
-          if (response.ok) {
-            const data = await response.json();
-            if (data && data.features && data.features.length > 0) {
-              const props = data.features[0].properties;
-              const city = props.city || props.town || props.village || props.county || props.municipality;
-              const state = props.state;
-              if (city) {
-                t.name = `Pedágio - Próximo a ${city}${state ? ` (${state})` : ''}`;
-              }
-            }
-          }
-        } catch (err) {
-          clearTimeout(timeoutId);
-          console.warn('Photon reverse geocode failed or timed out for toll', err);
-        }
-
-        // Small delay between requests
-        if (i < tolls.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 150));
-        }
-      }
-    }
+    const isRoundTripInternal = stops.length > 2 && stops[0].lat === stops[stops.length - 1].lat && stops[0].lng === stops[stops.length - 1].lng;
+    const { groupedTolls, tollCount, unpavedData } = await handleTollDetection(geometry, osrmTolls, stops, isRoundTripInternal, signal);
 
     return {
       distance: data.routes[0].distance,
       duration: data.routes[0].duration,
-      geometry: geometry,
+      geometry,
       stops,
       tollCount,
-      tolls,
+      tolls: groupedTolls,
       unpavedSegments: unpavedData.segments,
       totalUnpavedDistance: unpavedData.totalDistance
     };
   } catch (error) {
+    if ((error as any).name === 'AbortError') throw error;
     console.error('Erro OSRM Route:', error);
     return null;
   }
 };
+;
 
-export const optimizeRoute = async (stops: Stop[], avoidUnpaved: boolean = false, isRoundTrip: boolean = true) => {
+export const optimizeRoute = async (stops: Stop[], avoidUnpaved: boolean = false, isRoundTrip: boolean = true, signal?: AbortSignal) => {
   if (stops.length < 2) return null;
 
-  const coordinates = stops
-    .map(s => `${s.lng},${s.lat}`)
-    .join(';');
+  const coordinates = stops.map(s => `${s.lng},${s.lat}`).join(';');
 
   try {
-    let response = null;
     let data = null;
     let lastError = null;
 
     let urlsToTry = [...OSRM_BASE_URLS];
     if (avoidUnpaved) {
-      // Prioritize openstreetmap.de which supports exclude=unpaved
-      urlsToTry = [
-        'https://routing.openstreetmap.de/routed-car',
-        'https://router.project-osrm.org'
-      ];
+      urlsToTry = ['https://routing.openstreetmap.de/routed-car', 'https://router.project-osrm.org'];
     }
 
     for (const baseUrl of urlsToTry) {
+      if (signal?.aborted) throw new Error('AbortError');
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          // OSRM Trip service for TSP
           let url = `${baseUrl}/trip/v1/driving/${coordinates}?source=first&overview=full&geometries=polyline&steps=true&annotations=true`;
+          url += isRoundTrip ? '&roundtrip=true' : '&roundtrip=false&destination=any';
 
-          if (isRoundTrip) {
-            url += '&roundtrip=true';
-          } else {
-            url += '&roundtrip=false&destination=any';
-          }
-
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s para Optimize (pesado)
-
-          console.log(`OSRM Optimize Request (${baseUrl}): ${url}`);
-          response = await fetch(url, { signal: controller.signal });
-          clearTimeout(timeoutId);
-
+          const response = await fetch(url, { signal });
           if (response.ok) {
             data = await response.json();
             if (data.code === 'Ok') break;
-          } else {
-            const errorText = await response.text();
-            console.warn(`OSRM Optimize server ${baseUrl} returned ${response.status}: ${errorText}`);
           }
-        } catch (err) {
+        } catch (err: any) {
           lastError = err;
-          console.error(`OSRM Optimize attempt ${attempt + 1} failed for ${baseUrl}:`, err);
-          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1000));
+          if (err.name === 'AbortError') throw err;
+          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
-      if (data && data.code === 'Ok') break;
+      if (data?.code === 'Ok') break;
     }
 
-    if (!data || data.code !== 'Ok') {
-      throw lastError || new Error('Falha ao otimizar rota em todos os servidores');
-    }
+    if (!data || data.code !== 'Ok') throw lastError || new Error('Optimization Failed');
 
-    // Reorder stops based on waypoints
-    // The waypoints array in the response is ordered by the visit sequence.
-    // Each waypoint object has a 'waypoint_index' property that corresponds to the index in the original input.
-    const reorderedStops = data.waypoints.map((wp: any) => stops[wp.waypoint_index]);
+    const reorderedStops = data.waypoints
+      .sort((a: any, b: any) => a.waypoint_index - b.waypoint_index)
+      .map((wp: any) => stops[wp.waypoint_index]);
 
-    let tollCount = 0;
-    let inTollZone = false;
-    const tolls: { lat: number; lng: number; name: string }[] = [];
-
-    const trips = data.trips || [];
-    if (trips.length > 0) {
-      const legs = trips[0].legs || [];
-      legs.forEach((leg: any) => {
-        const steps = leg.steps || [];
-        steps.forEach((step: any) => {
-          const nameLower = step.name?.toLowerCase() || '';
-          const refLower = step.ref?.toLowerCase() || '';
-          const hasToll = step.intersections?.some((i: any) => i.classes?.includes('toll')) ||
-            nameLower.includes('pedágio') || nameLower.includes('pedagio') || nameLower.includes('toll') ||
-            refLower.includes('pedágio') || refLower.includes('pedagio') || refLower.includes('toll');
-
-          if (hasToll) {
-            if (!inTollZone) {
-              tollCount++;
-              inTollZone = true;
-
-              const tollLocation = step.intersections?.find((i: any) => i.classes?.includes('toll'))?.location ||
-                step.intersections?.[0]?.location ||
-                step.maneuver?.location;
-
-              if (tollLocation) {
-                const roadName = step.ref ? `Rodovia ${step.ref}` : (step.name ? step.name : 'Rodovia');
-                tolls.push({
-                  lat: tollLocation[1],
-                  lng: tollLocation[0],
-                  name: roadName
-                });
-              }
-            }
-          } else {
-            inTollZone = false;
-          }
-        });
+    const osrmTolls: any[] = [];
+    const trip = data.trips[0];
+    trip.legs?.forEach((leg: any) => {
+      leg.steps?.forEach((step: any) => {
+        const nameLower = (step.name || '').toLowerCase();
+        const hasToll = step.intersections?.some((i: any) => i.classes?.includes('toll')) ||
+                       nameLower.includes('pedágio') || nameLower.includes('pedagio') || nameLower.includes('toll');
+        if (hasToll) {
+          const loc = step.maneuver?.location;
+          if (loc) osrmTolls.push({ lat: loc[1], lng: loc[0], name: step.name || 'Pedágio' });
+        }
       });
-    }
+    });
 
-    const geometry = data.trips[0].geometry;
-
-    // Parallelize toll and unpaved road detection with strict max 4s timeout to avoid browser freeze
-    const [overpassTolls, unpavedData] = await Promise.all([
-      withTimeout(fetchTollsFromOverpass(geometry), 4000, []),
-      withTimeout(fetchUnpavedFromOverpass(geometry), 4000, { segments: [], totalDistance: 0 })
-    ]);
+    const geometry = trip.geometry;
+    const { groupedTolls, tollCount, unpavedData } = await handleTollDetection(geometry, osrmTolls, reorderedStops, isRoundTrip, signal);
 
     return {
-      distance: data.trips[0].distance,
-      duration: data.trips[0].duration,
-      geometry: geometry,
+      distance: trip.distance,
+      duration: trip.duration,
+      geometry,
       stops: reorderedStops,
       tollCount,
-      tolls,
+      tolls: groupedTolls,
       unpavedSegments: unpavedData.segments,
       totalUnpavedDistance: unpavedData.totalDistance
     };
   } catch (error) {
+    if ((error as any).name === 'AbortError') throw error;
     console.error('Erro OSRM Optimize:', error);
     return null;
   }
 };
+;

@@ -30,7 +30,7 @@ export interface RouteData {
   geometry: string; // polyline
   stops: Stop[];
   tollCount?: number;
-  tolls?: { lat: number; lng: number; name: string }[];
+  tolls?: { lat: number; lng: number; name: string; direction: 'ida' | 'volta' | 'ambos' }[];
   unpavedSegments?: { coordinates: [number, number][]; distance: number }[];
   totalUnpavedDistance?: number;
 }
