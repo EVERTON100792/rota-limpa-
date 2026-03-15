@@ -194,7 +194,7 @@ export const normalizeAddresses = async (rawText: string): Promise<{ original: s
 
     // Basic cleaning: remove common "noise" words at the start
     let clean = line
-      .replace(/^(?:endereço|entrega|ponto|parada|local|rua|av|avenida|travessa|alameda)[:\s-]+\s*/i, '')
+      .replace(/^(?:endere[cç]o|entrega|ponto|parada|local|destino)[:\s-]+\s*/i, '')
       .trim();
 
     // VIA-CEP ENHANCEMENT
@@ -323,6 +323,8 @@ export const geocodeAddress = async (address: string, biasLat?: number, biasLng?
     let expanded = addr
       .replace(/\bR\.\s*/gi, 'Rua ')
       .replace(/\bAv\.\s*/gi, 'Avenida ')
+      .replace(/^R\s+/gi, 'Rua ')
+      .replace(/^Av\s+/gi, 'Avenida ')
       .replace(/\bDr\.\s*/gi, 'Doutor ')
       .replace(/\bProf\.\s*/gi, 'Professor ')
       .replace(/\bJd\.\s*/gi, 'Jardim ')

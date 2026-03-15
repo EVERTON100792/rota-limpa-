@@ -71,7 +71,7 @@ export const extractCepAndNumber = (text: string): { cep: string | null, number:
     const textWithoutCep = text.replace(cep, '').trim();
 
     // Regex 1: Tenta pegar o número após as palavras "n", "nº", "numero" etc.
-    const explicitNumberMatch = textWithoutCep.match(/(?:n[º°.]?|número|numero)\s*(\d+[A-Za-z]?)(?:\b|\s|,|-)/i);
+    const explicitNumberMatch = textWithoutCep.match(/(?:n[º°.]?|número|numero|num|nr)\s*(\d+[A-Za-z]?)(?:\b|\s|,|-)/i);
 
     // Regex 2: Se sobrar apenas números e espaços soltos (ex o usuário digitou "86360000 2715")
     const strayNumberMatch = textWithoutCep.match(/(?:^|,\s*|\s+)(\d+[A-Za-z]?)(?:\b|\s|,|-)/);

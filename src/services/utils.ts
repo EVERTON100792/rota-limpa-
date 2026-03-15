@@ -17,25 +17,9 @@ export function getGoogleMapsUrl(stops: Stop[], isRoundTrip: boolean = false, ba
       return `${stop.lat},${stop.lng}`;
     }
 
-    // Para garantir que o Google Maps puxe a rua e o número EXATAMENTE como 
-    // está escrito no sistema, vamos enviar o texto do endereço otimizado.
-    let text = stop.address;
-
-    // Otimização para evitar que o Google Maps substitua o endereço por um
-    // Ponto de Interesse (Comércio, Praça, etc) por causa do nome do Bairro.
-    // O formato padrão gerado pelo nosso ViaCEP é: "Logradouro, Número, Bairro, Cidade, Estado"
-    if (text.includes(',')) {
-      const parts = text.split(',').map(p => p.trim());
-      // Se tiver 5 partes, removemos a parte do Bairro (índice 2) para o Maps focar na Rua e Número exatos
-      if (parts.length === 5) {
-        text = `${parts[0]}, ${parts[1]}, ${parts[3]} - ${parts[4]}`;
-      } else if (parts.length === 4) {
-        // Se tiver 4 partes, garantimos rua, numero e estado/cidade
-        text = `${parts[0]}, ${parts[1]}, ${parts[parts.length - 1]}`;
-      }
-    }
-
-    return encodeURIComponent(text);
+    // Envia o endereço exato como foi digitado ou processado, 
+    // para garantir que nenhuma informação (como bairro, complemento) se perca ao abrir o Maps
+    return encodeURIComponent(stop.address);
   };
 
   const points: string[] = [];

@@ -151,10 +151,19 @@ async function fetchFromOverpass(query: string, signal?: AbortSignal) {
     let delay = 300; 
 
     for (let i = 0; i < instancesToTry.length; i++) {
-      if (signal?.aborted) throw new Error('AbortError');
+      if (signal?.aborted) {
+        const e = new Error('AbortError');
+        e.name = 'AbortError';
+        throw e;
+      }
       const instance = instancesToTry[i];
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
+      const onExternalAbort = () => controller.abort();
+      if (signal) signal.addEventListener('abort', onExternalAbort);
+
+      // Aumentado para 15s para lidar melhor com rotas longas no Overpass
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       try {
         if (i > 0) {
@@ -168,10 +177,11 @@ async function fetchFromOverpass(query: string, signal?: AbortSignal) {
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded'
           },
-          signal: signal || controller.signal
+          signal: controller.signal
         });
 
         clearTimeout(timeoutId);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
 
         if (response.ok) {
           const data = await response.json();
@@ -194,8 +204,17 @@ async function fetchFromOverpass(query: string, signal?: AbortSignal) {
         }
       } catch (error: any) {
         clearTimeout(timeoutId);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
+
         lastError = error;
-        if (error.name === 'AbortError') throw error;
+        
+        if (signal?.aborted) {
+          const e = new Error('AbortError');
+          e.name = 'AbortError';
+          throw e;
+        }
+
+        // Se foi timeout interno (504 ou timeout), apenas registra falha e tenta próximo servidor
         OVERPASS_INSTANCE_STATUS.set(instance, { 
           lastFail: now(), 
           failCount: (OVERPASS_INSTANCE_STATUS.get(instance)?.failCount || 0) + 1,
@@ -266,8 +285,8 @@ async function fetchTollsFromOverpass(geometry: string, signal?: AbortSignal) {
       name: e.tags?.name || 'Pedágio'
     })).filter((e: any) => e.lat && e.lng);
   } catch (error) {
-    if ((error as any).name === 'AbortError') throw error;
-    console.error('Error fetching tolls from Overpass:', error);
+    if ((error as any).name === 'AbortError' || (error as any).message === 'AbortError') throw error;
+    console.warn('Fallback: Error fetching tolls from Overpass:', error);
     return [];
   }
 }
@@ -372,8 +391,8 @@ async function fetchUnpavedFromOverpass(geometry: string, signal?: AbortSignal) 
 
     return { segments: unpavedSegments, totalDistance: totalUnpavedDistance };
   } catch (error) {
-    if ((error as any).name === 'AbortError') throw error;
-    console.error('Error fetching unpaved from Overpass:', error);
+    if ((error as any).name === 'AbortError' || (error as any).message === 'AbortError') throw error;
+    console.warn('Fallback: Error fetching unpaved from Overpass:', error);
     return { segments: [], totalDistance: 0 };
   }
 }
@@ -414,8 +433,8 @@ function calculateDistance(v: [number, number], w: [number, number]) {
  */
 async function handleTollDetection(geometry: string, osrmTolls: any[], stops: Stop[], isRoundTrip: boolean, signal?: AbortSignal) {
   const [overpassTolls, unpavedData] = await Promise.all([
-    withTimeout(fetchTollsFromOverpass(geometry, signal), 15000, []),
-    withTimeout(fetchUnpavedFromOverpass(geometry, signal), 15000, { segments: [], totalDistance: 0 })
+    withTimeout(fetchTollsFromOverpass(geometry, signal), 25000, []),
+    withTimeout(fetchUnpavedFromOverpass(geometry, signal), 25000, { segments: [], totalDistance: 0 })
   ]);
 
   const routeCoords = decodePolyline(geometry);
